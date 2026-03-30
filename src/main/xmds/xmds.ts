@@ -32,6 +32,7 @@ import { LogsThreshold, RequiredFile } from '../common/types';
 import { ConsoleDB } from '../../shared/console/ConsoleDB';
 import { submitLogsXmlString } from '../common/parser';
 import { AxiosErrorCodes, handleXmdsError } from '../common/error/XmdsError';
+import { commandManager } from '../../shared/command/commandManager';
 
 interface XmdsEvents {
   collecting: () => void;
@@ -192,6 +193,11 @@ export class Xmds {
         await registerDisplay.parse();
         this.checkSchedule = registerDisplay.checkSchedule || null;
         this.checkRf = registerDisplay.checkRf || null;
+
+        // Parse out the list of commands and store them in the command manager.
+        const commands = registerDisplay.getCommands();
+        console.debug('[Xmds::registerDisplay] Commands received from CMS', { commands });
+        commandManager.parseCommands(commands);
 
         // Update the collection interval as necessary
         await this.updateInterval(registerDisplay.getSetting('collectInterval', 300) as number);
@@ -546,6 +552,51 @@ export class Xmds {
       });
 
       handleError(e);
+    }
+  }
+  
+  async getData(file: RequiredFile) {
+    try {
+      const soapXml = '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:soapenc="http://schemas.xmlsoap.org/soap/encoding/" xmlns:tns="urn:xmds" xmlns:types="urn:xmds/encodedTypes" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">\n' +
+        ' <soap:Body soap:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">\n' +
+        '   <tns:GetData>\n' +
+        '     <serverKey xsi:type="xsd:string"><![CDATA[' + this.config.cmsKey + ']]></serverKey>\n' +
+        '     <hardwareKey xsi:type="xsd:string">' + this.config.hardwareKey + '</hardwareKey>\n' +
+        '     <widgetId xsi:type="xsd:string">' + file.id + '</widgetId>\n' +
+        '   </tns:GetData>\n' +
+        ' </soap:Body>\n' +
+        '</soap:Envelope>';
+
+      return await axios.post(
+        this.config.cmsUrl + '/xmds.php?v=' + this.config.xmdsVersion + '&method=getData',
+        soapXml
+      )
+        .then(async (response) => {
+          const parser = new xml2js.Parser();
+          const rootDoc = await parser.parseStringPromise(response.data);
+
+          // Get the encoded XML
+          const xml = rootDoc["SOAP-ENV:Envelope"]["SOAP-ENV:Body"][0]["ns1:GetDataResponse"][0].data[0]._;
+
+          return xml;
+        })
+        .catch((error) => {
+          console.error('[Xmds::getData] > Error fetching data XML: ', {
+            error,
+          });
+
+          handleError(error, 'Unable to fetch data for widget with id ' + file.id);
+
+          return false;
+        });
+    } catch (e) {
+      console.error('[Xmds::getData] > Error fetching data XML: ', {
+        e,
+      });
+
+      handleError(e, 'Unable to fetch data for widget with id ' + file.id);
+
+      return false;
     }
   }
 }

@@ -35,7 +35,7 @@ import { Config } from './config/config';
 import { Xmds } from './xmds/xmds';
 import { State } from './common/state';
 import { createFileServer } from './express';
-import { downloadFile, downloadResourceFile, getDownloadedFiles, getLayoutFile, FileManagerFileType } from './common/fileManager';
+import { downloadFile, downloadResourceFile, getDownloadedFiles, getLayoutFile, FileManagerFileType, downloadWidgetDataFile } from './common/fileManager';
 import Schedule from './xmds/response/schedule/schedule';
 import ScheduleManager from './common/scheduleManager';
 import { InputLayoutType, LocalFile } from './common/types';
@@ -45,6 +45,9 @@ import { PoPStats } from './common/stats/PoPStats';
 import { submitStatXmlString } from './common/parser';
 import { Layout } from './xmds/response/schedule/events/layout';
 import { ConfigData, MainCallbackType } from '../shared/types';
+import { commandManager } from '../shared/command/commandManager';
+import { registerLocalCommands } from './command/localCommands';
+import { scheduleCriteriaManager } from '../shared/scheduleCriteria/scheduleCriteriaManager';
 
 // Axios interceptors
 axios.interceptors.request.use(req => {
@@ -282,14 +285,36 @@ const initXmrEventHandlers = async function () {
     await xmds.screenshot();
     await xmds.notifyStatus();
   });
-  // xmr.on('licenceCheck', async () => {
-  //   console.debug('Requesting a licence check', {method: 'Xmr::licenceCheck'});
-  //   await config.checkLicence(true, 0);
-  //   await xmds.notifyStatus();
-  // });
-  xmr.on('showStatusWindow', async (timeout) => {
-    mainWindow.webContents.send('showStatusWindow', timeout);
+  
+  /**
+   * Handle incoming schedule criteria updates from the CMS via XMR.
+   * This includes updates that originated from the API before being relayed by the CMS.
+   */
+  xmr.on('criteriaUpdate', async (criteriaUpdates) => {
+    for (const criteria of criteriaUpdates) {
+      const { metric, value, ttl } = criteria;
+      scheduleCriteriaManager.addOrReplace(metric, value, ttl);
+    }
+    console.log('[XMR::criteriaUpdate] - New criteria updates added', criteriaUpdates);
   });
+
+  /**
+   * Handles an incoming command identified by a CMS-provided command code.
+   */
+  xmr.on('commandCodeReceived', async (commandCode) => {
+    console.log('[Xmr::commandCodeReceived] - Received a new command', commandCode);
+    await commandManager.executeCommandByCode(commandCode);
+  });
+
+  /**
+   * @TODO: This will have a different implementation since required files are stored locally
+   * 
+   * Handles `dataUpdate` messages and forces the widget data to be downloaded and cached.
+   */
+  // xmr.on('dataUpdate', async (widgetId) => {
+  //   console.debug('[XMR::dataUpdate] Updating widget data cache', widgetId);
+  //   await requiredFileUpdate(widgetId, xmds);
+  // });
 }
 
 const initXmdsEventHandlers = async function (config: Config, xmr: Xmr) {
@@ -352,6 +377,17 @@ const initXmdsEventHandlers = async function (config: Config, xmr: Xmr) {
       } else if (file.type === 'resource') {
         const resourceHtml = await xmds.getResource(file);
         return await downloadResourceFile((file as unknown) as FileManagerFileType, resourceHtml);
+      } else if (file.type === 'widget') {
+        const widgetData = await xmds.getData(file);
+
+        if (!widgetData) {
+          console.debug('[Xmds::on("requiredFiles")] > No widget data received for widget ' + file.id);
+          return null;
+        }
+
+        console.debug('[Xmds::on("requiredFiles")] > Received widget data for widget ' + file.id, { widgetData });
+
+        return await downloadWidgetDataFile((file as unknown) as FileManagerFileType, widgetData);
       } else {
         return null;
       }
@@ -446,6 +482,13 @@ const mainFunctions = {
       // Initialize XMR
       await xmr.init();
     }
+
+    // Register local commands
+    
+    await registerLocalCommands({
+      xmds,
+      win,
+    });
 
     // Bind event handlers
     await initXmrEventHandlers();
@@ -558,6 +601,37 @@ const init = async (win: BrowserWindow) => {
 
   appConfig = await loadConfig();
 
+  console.debug('[MAIN] init > config', {
+    config,
+    appConfig,
+  });
+
+  // Set window to fullscreen
+  // If dimension and position settings are all "0"
+  if (appConfig.settings.offsetX === 0 &&
+    appConfig.settings.offsetY === 0 &&
+    appConfig.settings.sizeX === 0 &&
+    appConfig.settings.sizeY === 0) {
+    console.debug('[MAIN] init > No offset or size settings, setting window to fullscreen');
+    // Set window to fullscreen
+    win.setFullScreen(true);
+  } else {
+    // Otherwise, set the window to the specified dimensions and position.
+    const offsetX = appConfig.settings.offsetX;
+    const offsetY = appConfig.settings.offsetY;
+    const sizeX = appConfig.settings.sizeX || config.state.width;
+    const sizeY = appConfig.settings.sizeY || config.state.height;
+
+    console.debug('[MAIN] init > Setting window to custom dimensions and position', {
+      offsetX,
+      offsetY,
+      sizeX,
+      sizeY,
+    });
+    win.setSize(sizeX, sizeY);
+    win.setPosition(offsetX, offsetY);
+  }
+
   // // eslint-disable-next-line max-len
   // console.log(`Version: ${appConfig.version}, hardwareKey: ${appConfig.hardwareKey}`);
 
@@ -595,7 +669,7 @@ app.whenReady().then(() => {
         ],
         // 'Access-Control-Allow-Origin': ['http://localhost:5173'],  // Allow any domain to access
         'Access-Control-Allow-Methods': ['GET, POST, PUT, DELETE, OPTIONS'],  // Allowed methods
-        'Access-Control-Allow-Headers': ['Content-Type, Authorization']  // Allowed headers
+        'Access-Control-Allow-Headers': ['Content-Type, Authorization', 'x-preview-jwt']  // Allowed headers
       }
     });
   });
