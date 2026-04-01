@@ -111,9 +111,15 @@ export class RegisterDisplay {
       setting === 'offsetX' ||
       setting === 'offsetY' ||
       setting === 'sizeX' ||
-      setting === 'sizeY'
+      setting === 'sizeY' ||
+      setting === 'screenShotRequested' ||
+      setting === 'screenShotRequestInterval'
     ) {
       settingValue.value = parseInt(String(settingValue.value));
+    }
+
+    if (setting === 'sendCurrentLayoutAsStatusUpdate') {
+      settingValue.value = Boolean(parseInt(String(settingValue.value)));
     }
 
     console.debug('[RegisterDisplay::getSetting]', {

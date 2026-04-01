@@ -48,6 +48,8 @@ import { ConfigData, MainCallbackType } from '../shared/types';
 import { commandManager } from '../shared/command/commandManager';
 import { registerLocalCommands } from './command/localCommands';
 import { scheduleCriteriaManager } from '../shared/scheduleCriteria/scheduleCriteriaManager';
+import { xmdsMakeScreenshot } from '../shared/utils/xmdsUtil';
+import { IXlrEvents } from '@xibosignage/xibo-layout-renderer';
 
 // Axios interceptors
 axios.interceptors.request.use(req => {
@@ -109,6 +111,10 @@ const loadConfig = async () => {
 
   appConfig = JSON.parse(config.toJson());
 
+  if (appConfig && typeof appConfig.state === 'string') {
+    appConfig.state = JSON.parse(appConfig.state);
+  }
+
   return appConfig;
 };
 
@@ -141,6 +147,33 @@ ipcMain.handle('xmds-try-register', async (_event, _config) => {
       success: false,
       error: err,
     }
+  }
+});
+
+ipcMain.handle('execute-xlr-event', async (_event, { eventName, payload }: { eventName: keyof IXlrEvents, payload: any }) => {
+  console.debug(`[MAIN] [execute-xlr-event] > Executing XLR event from renderer`, {
+    eventName,
+    payload
+  });
+
+  if (eventName === 'layoutStart') {
+    state.currentLayoutId = payload.layoutId;
+
+    if (Object.hasOwn(config.settings, 'sendCurrentLayoutAsStatusUpdate') &&
+      config.settings.sendCurrentLayoutAsStatusUpdate === true
+    ) {
+      console.debug('[MAIN] [XLR::on("layoutStart")] > Sending current layout as status update to CMS', {
+        layoutId: state.currentLayoutId,
+      });
+
+      await xmds.notifyStatus(['currentLayoutId']);
+    }
+  } else if (eventName === 'commandCodeReceived') {
+    // Handle command code received event
+    await commandManager.executeCommandByCode(payload.commandCode);
+  } else if (eventName === 'commandStringReceived') {
+    // Handle command string received event
+    await commandManager.executeCommandByString(payload.commandString);
   }
 });
 
@@ -226,8 +259,7 @@ const configureFileManager = () => {
 let mainWindow: BrowserWindow;
 const createWindow = () => {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 720,
+    fullscreen: true,
     show: false,
     autoHideMenuBar: true,
     backgroundColor: '#000',
@@ -281,8 +313,7 @@ const initXmrEventHandlers = async function () {
     xmds.collectNow();
   });
   xmr.on('screenShot', async () => {
-    console.debug('Requesting a screenshot', { method: 'Xmr::screenShot' });
-    await xmds.screenshot();
+    await xmdsMakeScreenshot(xmds);
     await xmds.notifyStatus();
   });
   
@@ -317,6 +348,7 @@ const initXmrEventHandlers = async function () {
   // });
 }
 
+let screenshotIntervalId: NodeJS.Timeout | null = null;
 const initXmdsEventHandlers = async function (config: Config, xmr: Xmr) {
   // Bind to some events
   xmds.on('collecting', () => {
@@ -348,6 +380,50 @@ const initXmdsEventHandlers = async function (config: Config, xmr: Xmr) {
       config.cmsUrl?.replace(url.protocol, protocol) + '/xmr'
     );
     xmr.start(xmrWebSocketAddress, config.getSetting('xmrCmsKey', 'n/a'));
+    
+    const makeScreenshot = async () => {
+      await xmdsMakeScreenshot(xmds);
+      await xmds.notifyStatus();
+    };
+    const screenshotRequested = data.getSetting('screenShotRequested', 0);
+    console.debug('[Xmds::on("registered")] > screenShotRequested', screenshotRequested);
+    // Is there a screenshot request pending which we may have missed via XMR?
+    if (screenshotRequested === 1) {
+      console.debug('[Xmds::on("registered")] > Pending screenshot request found, capturing desktop and taking screenshot');
+
+      // Wait a bit and process it
+      setTimeout(async () => {
+        await makeScreenshot();
+      }, 1000);
+    }
+
+    const screenshotInterval = data.getSetting('screenShotRequestInterval', 0) as number;
+    console.debug('[Xmds::on("registered")] > screenShotRequestInterval', {
+      screenshotInterval,
+      screenshotIntervalId,
+    });
+
+    if (screenshotInterval === 0 && screenshotIntervalId !== null) {
+      console.debug('[Xmds::on("registered")] > Clearing existing screenshot interval before applying new one', {
+        screenshotIntervalId,
+      });
+      clearInterval(screenshotIntervalId);
+    }
+
+    const handleIntervalScreenshot = () => {
+      const screenshotIntervalInMinutes = (screenshotInterval * 60);
+      screenshotIntervalId = setInterval(async () => {
+        console.debug('[Xmds::on("registered")] > Regular screenshot request interval triggered, capturing desktop and taking screenshot', {
+          screenshotIntervalInMinutes: screenshotInterval,
+        });
+
+        await makeScreenshot();
+      }, screenshotIntervalInMinutes * 1000)
+    };
+
+    if (screenshotInterval > 0) {
+      handleIntervalScreenshot();
+    }
   });
 
   xmds.on('requiredFiles', async (data) => {
