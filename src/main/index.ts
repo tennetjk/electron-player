@@ -48,8 +48,11 @@ import { ConfigData, MainCallbackType } from '../shared/types';
 import { commandManager } from '../shared/command/commandManager';
 import { registerLocalCommands } from './command/localCommands';
 import { scheduleCriteriaManager } from '../shared/scheduleCriteria/scheduleCriteriaManager';
+import { geoLocationManager } from './common/geoLocationManager';
 import { xmdsMakeScreenshot } from '../shared/utils/xmdsUtil';
 import { IXlrEvents } from '@xibosignage/xibo-layout-renderer';
+import { DefaultLayout } from './xmds/response/schedule/events/defaultLayout';
+import { OverlayLayout } from './xmds/response/schedule/events/overlayLayout';
 
 // Axios interceptors
 axios.interceptors.request.use(req => {
@@ -100,6 +103,17 @@ const state = new State();
 export const config = new Config(app, process.platform, state);
 state.width = 1280;
 state.height = 720;
+
+// Keep state in sync whenever the geolocation manager accepts a new location
+geoLocationManager.on('geoLocationUpdated', () => {
+  const { latitude, longitude } = geoLocationManager.getCurrentLocation();
+  console.debug('[MAIN] geoLocationUpdated event received', {
+    latitude,
+    longitude,
+  });
+  if (latitude !== null) state.latitude = latitude;
+  if (longitude !== null) state.longitude = longitude;
+});
 
 let xmds: Xmds;
 let xmr: Xmr;
@@ -611,7 +625,7 @@ const mainFunctions = {
 
         if (schedule) {
           let scheduleLayouts =
-            [...schedule.layouts, schedule.defaultLayout].reduce((arr: InputLayoutType[], item) => {
+            [...schedule.layouts, schedule.defaultLayout, ...schedule.overlays].reduce((arr: InputLayoutType[], item: Layout | DefaultLayout | OverlayLayout) => {
               const _layout = getLayoutFile(item.file) as LocalFile;
 
               console.debug('[MAIN] manager.on("layouts") update-unique-layouts', {
@@ -622,15 +636,22 @@ const mainFunctions = {
               let _collection = [...arr];
 
               if (_layout) {
+                const layoutItem: InputLayoutType = {
+                  layoutId: item.file,
+                  response: item.response,
+                  path: _layout.name,
+                  shortPath: _layout.name,
+                  scheduleId: 'scheduleId' in item ? (item as Layout).scheduleId : -1,
+                  shareOfVoice: 'shareOfVoice' in item ? (item as (Layout | OverlayLayout)).shareOfVoice : 0,
+                };
+
+                if (item instanceof OverlayLayout || 'isOverlay' in item) {
+                  layoutItem.isOverlay = item.isOverlay as boolean;
+                }
+
                 _collection = [
                   ...arr,
-                  {
-                    layoutId: item.file,
-                    response: item.response,
-                    path: _layout.name,
-                    shortPath: _layout.name,
-                    scheduleId: 'scheduleId' in item ? (item as Layout).scheduleId : -1,
-                  }
+                  layoutItem,
                 ];
               }
 
@@ -656,7 +677,7 @@ const mainFunctions = {
                 layoutId: item.file,
                 path: layoutFile?.name || '',
                 shortPath: layoutFile?.name || '',
-                response: item.response,
+                response: item.response ?? '',
                 scheduleId: 'scheduleId' in item ? (item as Layout).scheduleId : -1,
               },
             ];
@@ -668,6 +689,42 @@ const mainFunctions = {
         console.debug('[MAIN::manager.on("layouts")] > Sending updated layout loop to renderer', { layouts: _layouts });
         // Send updated layout loop to XLR
         win.webContents.send('update-loop', _layouts);
+      });
+
+      manager.on('overlays', async (overlays) => {
+        console.debug({
+          method: 'manager::overlays',
+          message: 'updated overlay loop received with ' + overlays.length + ' overlays'
+        });
+        
+        const _overlays = overlays.reduce((arr: InputLayoutType[], item) => {
+          const layoutFile = getLayoutFile(item.file) as LocalFile;
+          let _collection = [...arr];
+
+          console.debug('[MAIN] manager.on("overlays") update-overlays', {
+            layoutFile,
+            item,
+          })
+
+          if (layoutFile) {
+            _collection = [
+              ...arr,
+              {
+                layoutId: item.file,
+                path: layoutFile?.name || '',
+                shortPath: layoutFile?.name || '',
+                response: item.response ?? '',
+                scheduleId: 'scheduleId' in item ? (item as Layout).scheduleId : -1,
+                isOverlay: item.isOverlay,
+              },
+            ];
+          }
+
+          return _collection;
+        }, []);
+
+        // Send updated overlay loop to XLR
+        win.webContents.send('update-overlays', _overlays);
       });
 
       await manager.start(10);
@@ -707,6 +764,9 @@ const init = async (win: BrowserWindow) => {
 
   appConfig = await loadConfig();
 
+  // Start resolving the device's location via IP geolocation
+  geoLocationManager.start();
+
   console.debug('[MAIN] init > config', {
     config,
     appConfig,
@@ -723,8 +783,8 @@ const init = async (win: BrowserWindow) => {
     win.setFullScreen(true);
   } else {
     // Otherwise, set the window to the specified dimensions and position.
-    const offsetX = appConfig.settings.offsetX;
-    const offsetY = appConfig.settings.offsetY;
+    const offsetX = appConfig.settings.offsetX ?? 0;
+    const offsetY = appConfig.settings.offsetY ?? 0;
     const sizeX = appConfig.settings.sizeX || config.state.width;
     const sizeY = appConfig.settings.sizeY || config.state.height;
 
@@ -778,6 +838,13 @@ app.whenReady().then(() => {
         'Access-Control-Allow-Headers': ['Content-Type, Authorization', 'x-preview-jwt']  // Allowed headers
       }
     });
+  });
+  session.defaultSession.setPermissionRequestHandler((_, permission, callback) => {
+    if (permission === 'geolocation') {
+      callback(true); // Approve geolocation permission requests
+    } else {
+      callback(false); // Deny all other permission requests
+    }
   });
 
   // Install dev tools extension.
