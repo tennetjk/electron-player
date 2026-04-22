@@ -40,7 +40,7 @@ import Schedule from './xmds/response/schedule/schedule';
 import ScheduleManager from './common/scheduleManager';
 import { InputLayoutType, LocalFile, RequiredFile } from './common/types';
 import { ConsoleDB } from '../shared/console/ConsoleDB';
-import { createExtendedConsole } from '../shared/console/ExtendedConsole';
+import { createExtendedConsole, registerConfigAdapter } from '../shared/console/ExtendedConsole';
 import { PoPStats } from './common/stats/PoPStats';
 import { submitStatXmlString } from './common/parser';
 import { Layout } from './xmds/response/schedule/events/layout';
@@ -53,6 +53,7 @@ import { xmdsMakeScreenshot } from '../shared/utils/xmdsUtil';
 import { IXlrEvents } from '@xibosignage/xibo-layout-renderer';
 import { DefaultLayout } from './xmds/response/schedule/events/defaultLayout';
 import { OverlayLayout } from './xmds/response/schedule/events/overlayLayout';
+import { Faults } from '../shared/faults/Faults';
 
 // Axios interceptors
 axios.interceptors.request.use(req => {
@@ -87,7 +88,12 @@ axios.interceptors.response.use(
 
 const popStats = new PoPStats();
 const db = new ConsoleDB();
-const consoleMain = createExtendedConsole({ db, context: 'main' });
+const consoleMain = createExtendedConsole({
+  db,
+  context: 'main',
+  getLogLevel: () => config.getSetting('logLevel', 'error'),
+});
+const faults = new Faults(db);
 
 // Replace global console in main
 (globalThis as any).console = consoleMain;
@@ -101,6 +107,7 @@ ipcMain.handle('renderer-log', (_event, level: string, args: any) => {
 let appConfig: ConfigData;
 const state = new State();
 export const config = new Config(app, process.platform, state);
+registerConfigAdapter({ getConfig: () => JSON.parse(config.toJson()) });
 state.width = 1280;
 state.height = 720;
 
@@ -121,7 +128,11 @@ let schedule: Schedule;
 let manager: ScheduleManager;
 
 const loadConfig = async () => {
+  console._log('[MAIN] > Loading config started');
+  const t = Date.now();
   await config.load();
+
+  console._log(`[MAIN] > Loading config finished in ${Date.now() - t}ms`);
 
   appConfig = JSON.parse(config.toJson());
 
@@ -182,6 +193,15 @@ ipcMain.handle('execute-xlr-event', async (_event, { eventName, payload }: { eve
 
       await xmds.notifyStatus(['currentLayoutId']);
     }
+  } else if (eventName === 'layoutEnd' || eventName === 'overlayEnd') {
+    if (manager) {
+      await manager.incrementPlayCount(payload.scheduleId);
+      console.debug(`[MAIN] [execute-xlr-event] > Play count incremented`, {
+        event: eventName,
+        scheduleId: payload.scheduleId,
+        playStats: manager.getPlayStats(payload.scheduleId),
+      });
+    }
   } else if (eventName === 'commandCodeReceived') {
     // Handle command code received event
     await commandManager.executeCommandByCode(payload.commandCode);
@@ -217,6 +237,11 @@ const configureIpc = (win) => {
     BrowserWindow.getAllWindows().forEach((win) => {
       win.webContents.send('stats-bc-message', payload);
     });
+  });
+
+  ipcMain.on('report-fault', (_event, faultData) => {
+    console.debug('[MAIN] report-fault event received', faultData);
+    faults.emitter.emit('message', faultData);
   });
 };
 
@@ -405,13 +430,13 @@ const initXmdsEventHandlers = async function (config: Config, xmr: Xmr) {
     );
     console.debug('[Xmds::collecIntervalTime] ' + xmds.collectIntervalTime + ' seconds');
   });
-  xmds.on('registered', (data) => {
+  xmds.on('registered', async (data) => {
     console.debug('[Xmds::on("registered")] > Registered', {
       registerDisplay: data,
       shouldParse: false,
     });
 
-    config.setConfig(data);
+    await config.setConfig(data);
 
     // XMDS register was a success, so we should create an XMR instance
     // TODO: Web Sockets are only supported by the CMS if the XMDS version is 7, otherwise ZeroMQ web sockets should be used.
@@ -575,9 +600,16 @@ const initXmdsEventHandlers = async function (config: Config, xmr: Xmr) {
     }
   });
 
+  let isReportingFaults = false;
   xmds.on('reportFaults', async () => {
-    console.debug('[Xmds::on("reportFaults")] > Reporting Faults');
-    await xmds.reportFaults();
+    if (isReportingFaults) return;
+    isReportingFaults = true;
+    try {
+      console.debug('[Xmds::on("reportFaults")] > Reporting Faults');
+      await xmds.reportFaults(faults.toJson());
+    } finally {
+      isReportingFaults = false;
+    }
   });
 };
 
@@ -614,6 +646,12 @@ const mainFunctions = {
     await initXmrEventHandlers();
     await initXmdsEventHandlers(config, xmr);
 
+    // Delete faults on app start/reboot
+    faults.clearDB('MAIN');
+
+    // Periodically check for expired faults and delete it
+    faults.clear();
+
     if (!manager) {
       manager = new ScheduleManager(schedule, config);
 
@@ -627,11 +665,6 @@ const mainFunctions = {
           let scheduleLayouts =
             [...schedule.layouts, schedule.defaultLayout, ...schedule.overlays].reduce((arr: InputLayoutType[], item: Layout | DefaultLayout | OverlayLayout) => {
               const _layout = getLayoutFile(item.file) as LocalFile;
-
-              console.debug('[MAIN] manager.on("layouts") update-unique-layouts', {
-                _layout,
-                item,
-              })
 
               let _collection = [...arr];
 
@@ -664,11 +697,6 @@ const mainFunctions = {
         const _layouts = layouts.reduce((arr: InputLayoutType[], item) => {
           const layoutFile = getLayoutFile(item.file) as LocalFile;
           let _collection = [...arr];
-
-          console.debug('[MAIN] manager.on("layouts") update-loop', {
-            layoutFile,
-            item,
-          })
 
           if (layoutFile) {
             _collection = [

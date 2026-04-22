@@ -33,13 +33,17 @@ export class Config {
   readonly appType: string = 'electron';
 
   // App information
-  readonly version: string = "v4 R403";
-  readonly versionCode: number = 403;
+  readonly version: string = __APP_VERSION__;
+  readonly versionCode: number = __APP_VERSION_CODE__;
 
   // Config file
   readonly savePath: string;
   readonly cmsSavePath: string;
   readonly dbPath: string;
+
+  // Write queues — serialize concurrent writes per file
+  private _saveQueue: Promise<void> = Promise.resolve();
+  private _saveCmsQueue: Promise<void> = Promise.resolve();
 
   // State
   state: State;
@@ -68,11 +72,23 @@ export class Config {
     this.dbPath = join(savePath, 'playerDb.db');
     this.settings = {};
     this.state = state;
-    this.state.appVersionCode = process.env.APP_VERSION_CODE || this.versionCode;
+    this.state.appVersionCode = this.versionCode;
   };
 
   async load() {
     console.log(`Loading ${this.savePath}`);
+
+    console.alert(`Player version is ${this.versionCode}`, {
+      shouldParse: false,
+      eventType: 'Other',
+      alertType: 'both',
+    });
+
+    console.alert(`Starting ${this.appType} application`, {
+      shouldParse: false,
+      eventType: 'App Start',
+      alertType: 'both',
+    });
 
     try {
       let data = await fs.readFile(this.savePath);
@@ -106,29 +122,48 @@ export class Config {
   };
 
   async save() {
+    this._saveQueue = this._saveQueue
+      .then(() => this._doSave())
+      .catch((err) => console.error(`[Config::save] Failed to save config:`, err));
+    return this._saveQueue;
+  };
+
+  private async _doSave() {
     console.log(`Saving ${this.savePath}`);
+    const tmp = this.savePath + '.tmp';
     await fs.writeFile(
-      this.savePath,
+      tmp,
       JSON.stringify({
         hardwareKey: this.hardwareKey,
         xmrChannel: this.xmrChannel,
         cmsUrl: this.cmsUrl,
         cmsKey: this.cmsKey,
         macAddress: this.macAddress,
+        platform: this.platform,
       }, null, 2),
     );
+    await fs.rename(tmp, this.savePath);
   };
 
   async saveCms() {
+    this._saveCmsQueue = this._saveCmsQueue
+      .then(() => this._doSaveCms())
+      .catch((err) => console.error(`[Config::saveCms] Failed to save CMS config:`, err));
+    return this._saveCmsQueue;
+  };
+
+  private async _doSaveCms() {
     console.log(`Saving ${this.cmsSavePath}`);
+    const tmp = this.cmsSavePath + '.tmp';
     await fs.writeFile(
-      this.cmsSavePath,
+      tmp,
       JSON.stringify({
         displayName: this.displayName,
         xmdsVersion: this.xmdsVersion,
         settings: this.settings,
       }, null, 2),
     );
+    await fs.rename(tmp, this.cmsSavePath);
   };
 
   isConfigured() {
@@ -160,7 +195,7 @@ export class Config {
     this.settings['sendCurrentLayoutAsStatusUpdate'] = registerDisplay.getSetting('sendCurrentLayoutAsStatusUpdate', false);
     this.state.displayStatus = registerDisplay.status || 0;
 
-    this.saveCms();
+    await this.saveCms();
   }
 
   getSetting(setting: string, defaultValue?: any) {

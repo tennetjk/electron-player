@@ -4,7 +4,6 @@ import he from 'he';
 import type { ConsoleDB, LogEntry } from './ConsoleDB';
 import { flatLogObj, FlattenedObject, flattenObject, unflattenObject } from '../../main/common/parser';
 import { LogCategoryType } from '../loggerLib';
-import { ConfigData } from '../types';
 
 export interface ConfigAdapter {
   getConfig(): Promise<any> | any;
@@ -56,39 +55,31 @@ export function createExtendedConsole(
     db?: ConsoleDB;
     context: 'main' | 'renderer';
     sendToMain?: (level: ConsoleLevel, ...args: any[]) => void;
+    getLogLevel?: () => string;
   }
 ): ExtendedConsole {
   const { db, context = 'main', sendToMain } = opts;
   const base = globalThis.console;
 
-  const logToDB = async (level: ConsoleLevel, ...data: any[]) => {
-    // Load app config and get log level
-    const config = await loadConfig() as ConfigData;
+  const logToDB = (level: ConsoleLevel, ...data: any[]) => {
+    const logLevel = opts.getLogLevel ? opts.getLogLevel() : 'error';
 
-    // await config.load();
-    const logLevel = config?.settings?.logLevel ?? 'error';
-
-    // Don't save logs when logLevel is 'off' or 'error'
-    if (
-      ['debug', 'info', 'log'].includes(level) &&
-      (logLevel === 'off' || logLevel === 'error')
-    ) {
+    // When logging is completely disabled, stop here
+    if (logLevel === 'off') {
       return;
     }
 
-    // Error logs are always saved unless logLevel is 'off' or not 'error'
-    if (level === 'error' &&
-      (logLevel === 'off' || logLevel !== 'error')
-    ) {
-      return;
-    }
+    // Determine whether this log should be written to the DB based on logLevel
+    const shouldWriteToDB =
+      !(['debug', 'info', 'log'].includes(level) && logLevel === 'error') &&
+      !(level === 'error' && logLevel !== 'error');
 
-    if (db) {
+    if (db && shouldWriteToDB) {
       let logEntry = getLogEntryFromArgs(undefined, data) as LogEntry | undefined;
 
       // Try to serialize data
       if (!logEntry) {
-        logEntry = serializeArgs(data.flat()) as LogEntry;
+        logEntry = serializeArgs(data.flat(), level) as LogEntry;
       }
 
       if (logEntry && isLogEntry(logEntry)) {
@@ -98,15 +89,36 @@ export function createExtendedConsole(
 
       if (logEntry) {
         // Escape message to prevent issues with special characters
-        const logMsg = "<![CDATA[" + logEntry.message + "]]>"
+        let logMsg = logEntry.message;
+
+        if (level !== 'fault') {
+          logMsg = "<![CDATA[" + logEntry.message + "]]>"
+        }
+
         logEntry.message = he.encode(logMsg);
         logEntry.category = levelsCategoryMap[level] as LogCategoryType;
 
-        db.insert(logEntry);
-      }
+        if (level === 'fault' && db.faultExists(logEntry.code ?? null, {
+          layoutId: logEntry.layoutId ?? null,
+          regionId: logEntry.regionId ?? null,
+          widgetId: logEntry.widgetId ?? null,
+          mediaId: logEntry.mediaId ?? null,
+          scheduleId: logEntry.scheduleId ?? null,
+        })) {
+          return;
+        }
 
+        try {
+          db.insert(logEntry);
+        } catch (err) {
+          base.error(`[ExtendedConsole::${context}] Failed to write log to DB`, { error: err, logEntry });
+        }
+      }
     }
 
+    // Always forward to main — the main process applies its own logLevel filter
+    // before writing to DB. Without this, renderer logs are silently dropped when
+    // the renderer context has no db of its own.
     if (sendToMain) {
       console._log(`[ExtendedConsole::${context}] Sending log to main`, { level, data });
       sendToMain(level, ...data);
@@ -176,10 +188,10 @@ export function createExtendedConsole(
   return extended;
 }
 
-export function serializeArgs(input: any[]): LogEntry {
+export function serializeArgs(input: any[], level: ConsoleLevel): LogEntry {
   const log: LogEntry = {
     uid: uuidv4(),
-    level: 'log',
+    level: level ?? 'log',
     message: '',
     timestamp: Date.now(),
     context: 'main',
@@ -191,7 +203,13 @@ export function serializeArgs(input: any[]): LogEntry {
     eventType: undefined,
     alertType: undefined,
     refId: undefined,
-    log: {} as Record<string, any>
+    log: {} as Record<string, any>,
+    code: undefined,
+    count: undefined,
+    date: undefined,
+    expires: undefined,
+    regionId: undefined,
+    widgetId: undefined,
   };
 
   let consoleDataObj: LogEntry | undefined = undefined;
@@ -230,6 +248,30 @@ export function serializeArgs(input: any[]): LogEntry {
 
   if (consoleDataObj && Boolean(consoleDataObj['refId'])) {
     log.refId = consoleDataObj['refId'];
+  }
+
+  if (consoleDataObj && Boolean(consoleDataObj['code'])) {
+    log.code = String(parseInt(String(consoleDataObj['code'])));
+  }
+
+  if (consoleDataObj && Boolean(consoleDataObj['count'])) {
+    log.count = consoleDataObj['count'];
+  }
+
+  if (consoleDataObj && Boolean(consoleDataObj['date'])) {
+    log.date = consoleDataObj['date'];
+  }
+
+  if (consoleDataObj && Boolean(consoleDataObj['expires'])) {
+    log.expires = consoleDataObj['expires'];
+  }
+
+  if (consoleDataObj && Boolean(consoleDataObj['regionId'])) {
+    log.regionId = consoleDataObj['regionId'];
+  }
+
+  if (consoleDataObj && Boolean(consoleDataObj['widgetId'])) {
+    log.widgetId = consoleDataObj['widgetId'];
   }
 
   const flat = flattenObject(input);

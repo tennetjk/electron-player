@@ -30,7 +30,7 @@ import RequiredFiles from "./response/requiredFiles";
 import Schedule from "./response/schedule/schedule";
 import { LogsThreshold, RequiredFile } from '../common/types';
 import { ConsoleDB } from '../../shared/console/ConsoleDB';
-import { submitLogsXmlString } from '../common/parser';
+import { escapeStringForXml, submitLogsXmlString } from '../common/parser';
 import { AxiosErrorCodes, handleXmdsError } from '../common/error/XmdsError';
 import { commandManager } from '../../shared/command/commandManager';
 import { StateData } from '../common/state';
@@ -204,8 +204,8 @@ export class Xmds {
         await this.updateInterval(registerDisplay.getSetting('collectInterval', 300) as number);
 
         // Save config
-        this.config.save();
-        this.config.saveCms();
+        await this.config.save();
+        await this.config.saveCms();
 
         console.debug('Display registered', {
           method: 'XMDS::registerDisplay',
@@ -351,6 +351,11 @@ export class Xmds {
     const logLevel = this.config.getSetting('logLevel', 'error');
     const logLevelCategory = logLevel.charAt(0).toUpperCase() + logLevel.slice(1);
     const logs = db.getLogsByCategory(logLevelCategory, LogsThreshold);
+    console.debug('[Xmds::handleSubmitLogs] Handling log submission', { 
+      logsCount: logs.length, 
+      logLevelCategory,
+      logLevel,
+    });
 
     this.hasSubmittedLogs = false;
 
@@ -491,31 +496,27 @@ export class Xmds {
     }
   }
 
-  async reportFaults() {
+  async reportFaults(faults: string) {
     console.debug('[Xmds::reportFaults] Reporting Faults to CMS');
-    // try {
-    //   const faults = new FaultsLib();
-    //   const faultsParam = await faults.toJson();
+    try {
 
-    //   console.debug('[XMDS::reportFaults] > faultsParam', faultsParam);
+      const soapXml = '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:soapenc="http://schemas.xmlsoap.org/soap/encoding/" xmlns:tns="urn:xmds" xmlns:types="urn:xmds/encodedTypes" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">\n' +
+          ' <soap:Body soap:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">\n' +
+          '   <tns:ReportFaults>\n' +
+          '     <serverKey xsi:type="xsd:string"><![CDATA[' + this.config.cmsKey + ']]></serverKey>\n' +
+          '     <hardwareKey xsi:type="xsd:string">' + this.config.hardwareKey + '</hardwareKey>\n' +
+          '     <fault xsi:type-="xsd:string">' + escapeStringForXml(faults) + '</fault>\n' +
+          '   </tns:ReportFaults>\n' +
+          ' </soap:Body>\n' +
+          '</soap:Envelope>';
 
-    //   const soapXml = '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:soapenc="http://schemas.xmlsoap.org/soap/encoding/" xmlns:tns="urn:xmds" xmlns:types="urn:xmds/encodedTypes" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">\n' +
-    //       ' <soap:Body soap:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">\n' +
-    //       '   <tns:ReportFaults>\n' +
-    //       '     <serverKey xsi:type="xsd:string"><![CDATA[' + this.config.cmsKey + ']]></serverKey>\n' +
-    //       '     <hardwareKey xsi:type="xsd:string">' + this.config.hardwareKey + '</hardwareKey>\n' +
-    //       '     <fault xsi:type-="xsd:string">' + faultsParam + '</fault>\n' +
-    //       '   </tns:ReportFaults>\n' +
-    //       ' </soap:Body>\n' +
-    //       '</soap:Envelope>';
-
-    //   return await axios.post(
-    //     '/xmds.php?v=' + this.config.xmdsVersion + '&method=reportFaults',
-    //     soapXml
-    //   );
-    // } catch (e) {
-    //   return handleError(e);
-    // }
+      return await axios.post(
+        this.config.cmsUrl + '/xmds.php?v=' + this.config.xmdsVersion + '&method=reportFaults',
+        soapXml
+      );
+    } catch (e) {
+      return handleError(e);
+    }
   }
 
   async getResource(file: RequiredFile) {
