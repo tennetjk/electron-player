@@ -544,7 +544,7 @@ const initXmdsEventHandlers = async function (config: Config, xmr: Xmr) {
     );
   });
 
-  xmds.on('schedule', (data) => {
+  xmds.on('schedule', async (data) => {
     schedule = data;
     console.debug('[Xmds::on("schedule")] > Schedule', {
       schedule: data,
@@ -558,6 +558,11 @@ const initXmdsEventHandlers = async function (config: Config, xmr: Xmr) {
       console.debug('>>>> XLR.debug Schedule updated', { schedule });
       manager.isAssessing = false;
     });
+
+    // Schedule time-based commands from the CMS schedule, if any
+    const validScheduledCommands = await manager.assessCommands();
+
+    commandManager.scheduleCommands(validScheduledCommands);
   });
 
   xmds.on('submitLogs', async () => {
