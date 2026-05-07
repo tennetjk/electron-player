@@ -590,6 +590,15 @@ const initXmdsEventHandlers = async function (config: Config, xmr: Xmr) {
       manager.isAssessing = false;
     });
 
+    // Check if the current schedule contains any weather-based criteria.
+    // If found, enable the weather flag so XMDS fetches weather updates
+    // automatically on the next collection interval.
+    const hasWeatherCriteria = schedule.layouts.some((layout: any) =>
+      Array.isArray(layout.criteria) &&
+      layout.criteria.some((c: any) => c.type === 'weather')
+    );
+    xmds.setGetWeatherData(hasWeatherCriteria);
+    
     // Schedule time-based commands from the CMS schedule, if any
     const validScheduledCommands = await manager.assessCommands();
 
@@ -635,6 +644,20 @@ const initXmdsEventHandlers = async function (config: Config, xmr: Xmr) {
       });
     }
   });
+
+  /**
+   * Handles incoming weather criteria updates received from the CMS via XMDS.
+   * These updates are stored locally with a TTL slightly longer than the collection interval.
+   */
+  xmds.on('weatherCriteriaUpdates', async (criteriaUpdates: Record<string, any>) => {
+    // Add a TTL slightly longer (+30 seconds) than the collection interval
+    const ttl = (xmds.collectIntervalTime ?? 300) + 30;
+
+    for (const [metric, value] of Object.entries(criteriaUpdates)) {
+      scheduleCriteriaManager.addOrReplace(metric, value, ttl)
+    }
+    console.log('[Xmds::weatherCriteriaUpdates] - New weather criteria updates added', {criteriaUpdates});
+  })
 
   let isReportingFaults = false;
   xmds.on('reportFaults', async () => {
