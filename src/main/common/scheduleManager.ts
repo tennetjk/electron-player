@@ -139,8 +139,10 @@ export default class ScheduleManager {
         }
 
         // Start evaluating layouts
+        const skippedLayoutIds: number[] = [];
+        const validLayoutIds: number[] = [];
         const evaluatedLayouts  = (await Promise.all(
-            this.schedule.layouts.map(layout => this.evaluateLayout(layout, now))
+            this.schedule.layouts.map(layout => this.evaluateLayout(layout, now, skippedLayoutIds, validLayoutIds))
         )).filter(l => l !== null);
 
         // Find the highest priority
@@ -351,12 +353,26 @@ export default class ScheduleManager {
             });
         }
 
-        // Update the status window with the new layout loop.
+        // Status window state updates
         if (this.layouts.length > 0) {
             this.config.state.scheduleLoop = this.layouts.map((el) => {
                 return el.hash();
             }).join(', ');
         }
+
+        this.config.state.invalidLayoutIds = skippedLayoutIds;
+        this.config.state.validLayoutIds = validLayoutIds;
+
+        // Build the full layout list for display, marking unscheduled ones with * and the default with (D)
+        const loopIds = new Set(loop.map(l => l.file));
+        const allLayouts = this.schedule.layouts.map(l =>
+            l.file + (loopIds.has(l.file) ? '' : '*')
+        );
+        if (this.schedule.defaultLayout) {
+            const defaultId = this.schedule.defaultLayout.file;
+            allLayouts.push(defaultId + ' (D)' + (loopIds.has(defaultId) ? '' : '*'));
+        }
+        this.config.state.allLayoutIds = allLayouts.join(', ');
 
         this.isAssessingLayouts = false;
     }
@@ -441,6 +457,71 @@ export default class ScheduleManager {
     }
 
     /**
+     * Assess commands from the current schedule
+     * 
+     * @returns An array of eligible commands that can be scheduled for execution
+     */
+    async assessCommands() {
+        if (!this.schedule || !Array.isArray(this.schedule.commands)) {
+            return [];
+        }
+
+        const now = new Date();
+
+        const evaluatedCommands =  this.schedule.commands.filter(command => {
+            const executeAt = new Date(command.date).getTime();
+
+            // Skip commands that are already in the past
+            if (executeAt < now.getTime()) {
+                return false;
+            }
+
+            // If there is criteria, then evaluate all criteria attached to the command
+            if (command.hasCriteria()) {
+                for (const {metric, condition, value} of command.criteria ?? []) {
+                    const matched = scheduleCriteriaManager.evaluateCriteria(
+                        metric,
+                        condition,
+                        value
+                    );
+
+                    if (!matched) {
+                        return false;
+                    }
+                }
+            }
+
+            // Handle geofence logic if applicable
+            if (command.isGeoAware) {
+                // Extract the polygon from the command's geoLocation
+                const geo = JSON.parse(command.geoLocation);
+                const polygon = geo.geometry.coordinates[0];
+
+                // Check if the device's current location falls inside the polygon
+                const insidePolygon = geoLocationManager.isCurrentLocationInsidePolygon(polygon);
+
+                // If the device is outside the polygon, skip this command
+                if (!insidePolygon) {
+                    return false;
+                }
+            }
+
+            return true;
+        });
+
+        if (evaluatedCommands.length === 0) {
+            return [];
+        }
+
+        // Find the highest priority
+        const maxPriority = Math.max(...evaluatedCommands.map(c => c.priority));
+
+        // Keep only command/s with the highest priority
+        // If all commands share the same priority value, then they are all included
+        return evaluatedCommands.filter(c => c.priority === maxPriority);
+    }
+
+    /**
      * Evaluates whether a layout is eligible for playback at the given time.
      * Resets interrupt tracking and checks date range, file availability, and
      * schedule criteria before allowing it into the playback loop.
@@ -449,7 +530,7 @@ export default class ScheduleManager {
      * @param now - The current timestamp used for validation.
      * @private
      */
-    private async evaluateLayout<T extends (Layout | OverlayLayout)>(layout: T, now: Date) {
+    private async evaluateLayout<T extends (Layout | OverlayLayout)>(layout: T, now: Date, skipped?: number[], valid?: number[]) {
         // Reset interrupt tracking
         layout.interruptCommittedDuration = 0;
 
@@ -465,8 +546,11 @@ export default class ScheduleManager {
                 layoutId: layout.file,
                 method: 'Schedule: Manager: Assess'
             });
+            skipped?.push(layout.file);
             return null;
         }
+
+        valid?.push(layout.file);
 
         // Evaluate criteria (if any)
         if (layout.hasCriteria()) {
@@ -484,7 +568,7 @@ export default class ScheduleManager {
             const geo = JSON.parse(layout.geoLocation);
             const polygon = geo.geometry.coordinates[0];
 
-            // Check if the device's current location falls inside the polygon
+            // Check if the device's current location falls inside thsse polygon
             const insidePolygon = geoLocationManager.isCurrentLocationInsidePolygon(polygon);
 
             // If the device is outside the polygon, skip this layout
