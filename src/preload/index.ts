@@ -56,6 +56,15 @@ const apiHandler: ApiHandler = {
   },
   getConfig: () => ipcRenderer.invoke('get-config'),
   executeXlrEvent: (eventName: keyof IXlrEvents, payload: any) => ipcRenderer.invoke('execute-xlr-event', { eventName, payload }),
+  sspGetAd: () => ipcRenderer.invoke('ssp-get-ad'),
+  sspReportImpression: (urls: string[], duration: number, lat: number | null, lng: number | null) =>
+    ipcRenderer.invoke('ssp-report-impression', { urls, duration, lat, lng }),
+  sspReportError: (urls: string[], code: number) =>
+    ipcRenderer.invoke('ssp-report-error', { urls, code }),
+  sspGetWidgetAd: (partnerId: string) =>
+    ipcRenderer.invoke('ssp-get-widget-ad', partnerId),
+  sspReportWidgetImpression: (urls: string[], duration: number) =>
+    ipcRenderer.invoke('ssp-report-widget-impression', urls, duration),
 }
 
 contextBridge.exposeInMainWorld('apiHandler', apiHandler);

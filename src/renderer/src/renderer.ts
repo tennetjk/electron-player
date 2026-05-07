@@ -23,14 +23,30 @@ import './assets/main.css';
 import '@xibosignage/xibo-layout-renderer/dist/styles.css';
 
 import $ from 'jquery';
-import XiboLayoutRenderer, { ConsumerPlatform, ELayoutState, IXlr, OptionsType } from '@xibosignage/xibo-layout-renderer';
+import XiboLayoutRenderer, { ConsumerPlatform, ELayoutState, InputLayoutType, IXlr, OptionsType } from '@xibosignage/xibo-layout-renderer';
 import DefaultLayout from './layout/defaultLayout';
 
 import { ConfigHandler } from './ConfigHandler';
-import { ConfigData } from '@shared/types';
+import { ConfigData, SspAdData } from '@shared/types';
 import logo from './assets/images/logo.png';
 
 let xlr: IXlr;
+let currentSspAd: SspAdData | null = null;
+
+function generateSspXlf(ad: SspAdData): string {
+  return '<?xml version="1.0"?>\n' +
+    '<layout schemaVersion="1" width="' + ad.width + '" height="' + ad.height + '" bgcolor="#000000" background="">\n' +
+    '\t<region id="axe" width="' + ad.width + '" height="' + ad.height + '" top="0" left="0">\n' +
+    '\t\t<media id="axe" type="' + ad.xiboType + '" duration="' + ad.duration + '" lkid="1" schemaVersion="1">\n' +
+    '\t\t\t<options>\n' +
+    '\t\t\t\t<uri>' + ad.url + '</uri>\n' +
+    '\t\t\t</options>\n' +
+    '\t\t\t<raw/>\n' +
+    '\t\t</media>\n' +
+    '\t\t<options/>\n' +
+    '\t</region>\n' +
+    '</layout>\n';
+}
 
 if (window.__extendedConsole) {
   (globalThis as any).console = window.__extendedConsole;
@@ -72,11 +88,46 @@ const runConfigHandler = async (config: ConfigData) => {
 };
 
 const initXlrEventHandlers = function () {
-  // TODO: implement an ad request in XLR.
-  // xlr.on('adRequest', async (sspLayoutIndex: number) => {
-  //   const sspLayout = await ssp.getAd();
-  //   xlr.updateInputLayout(sspLayoutIndex, (sspLayout as unknown) as InputLayoutType);
-  // });
+  xlr.on('sspWidgetRequest', async (media) => {
+    console.debug('[XLR::on("sspWidgetRequest")] > Requesting SSP widget ad', {
+      mediaId: media.id,
+      partnerId: media.options.partnerid,
+    });
+    const adData = await window.apiHandler.sspGetWidgetAd(media.options.partnerid);
+    if (adData) {
+      media.setSspAdUrl(
+        adData.url,
+        adData.xiboType as 'image' | 'video',
+        adData.impressionUrls,
+        adData.errorUrls,
+      );
+    }
+    // If null → no ad available; XLR will auto-skip via sspWidgetEnd([], [], 0)
+  });
+
+  xlr.on('sspWidgetEnd', async (impressionUrls, _errorUrls, duration) => {
+    if (impressionUrls.length === 0) return;
+    console.debug('[XLR::on("sspWidgetEnd")] > SSP widget played, reporting impression', {
+      impressionUrls,
+      duration,
+    });
+    await window.apiHandler.sspReportWidgetImpression(impressionUrls, duration);
+  });
+
+  xlr.on('adRequest', async (sspLayoutIndex: number) => {
+    console.debug('[XLR::on("adRequest")] > Requesting SSP ad for slot', sspLayoutIndex);
+    const adData = await window.apiHandler.sspGetAd();
+    if (!adData) {
+      console.warn('[RENDERER] [XLR::on("adRequest")] > No SSP ad available');
+    }
+    currentSspAd = adData;
+    xlr.updateInputLayout(sspLayoutIndex, {
+      ad: adData ?? null,
+      duration: adData?.duration ?? 0,
+      layoutId: -1,
+      getXlf: () => adData ? generateSspXlf(adData) : '',
+    } as InputLayoutType);
+  });
 
   /**
    * Handles an incoming command identified by a CMS-provided command code.
@@ -107,6 +158,28 @@ const initXlrEventHandlers = function () {
   });
 
   xlr.on('layoutEnd', async (layout) => {
+    // SSP impression reporting
+    if (layout.layoutId === -1 && currentSspAd) {
+      if (layout.state === ELayoutState.PLAYED && currentSspAd.impressionUrls.length > 0) {
+        console.debug('[RENDERER] [XLR::on("layoutEnd")] > SSP ad played, reporting impression');
+        await window.apiHandler.sspReportImpression(
+          currentSspAd.impressionUrls,
+          currentSspAd.duration,
+          window.config?.state?.latitude ?? null,
+          window.config?.state?.longitude ?? null,
+        );
+      }
+
+      if (layout.state === ELayoutState.ERROR && currentSspAd.errorUrls.length > 0) {
+        console.debug('[RENDERER] [XLR::on("layoutEnd")] > SSP ad error, reporting error');
+        await window.apiHandler.sspReportError(
+          currentSspAd.errorUrls,
+          layout.errorCode ?? 405,
+        );
+      }
+      currentSspAd = null;
+    }
+
     if (layout.state !== ELayoutState.PLAYED) return;
     console.debug('[RENDERER] [XLR::on("layoutEnd")] > Layout ended', {
       scheduleId: layout.scheduleId,

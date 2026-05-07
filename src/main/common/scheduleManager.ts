@@ -360,6 +360,10 @@ export default class ScheduleManager {
             }).join(', ');
         }
 
+        console.debug('[ScheduleManager::assessLayouts] > Assessment of layouts finished', {
+            method: 'Schedule: Manager: Assess Layouts',
+            scheduleLoop: this.config.state.scheduleLoop,
+        });
         this.config.state.invalidLayoutIds = skippedLayoutIds;
         this.config.state.validLayoutIds = validLayoutIds;
 
