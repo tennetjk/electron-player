@@ -139,6 +139,7 @@ export class Faults {
             .map(f => ({
                 code: parseInt(f.code ?? FaultCodes.FaultGeneralError.toString()),
                 reason: f.message ?? '',
+                mediaId: f.mediaId ?? null,
                 layoutId: f.layoutId ?? null,
                 scheduleId: f.scheduleId ?? null,
             }));
